@@ -1,0 +1,116 @@
+name: CD - Continuous Deployment
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  REGISTRY_NAME: 'fgcregistry'
+  IMAGE_NAME: 'fgc-payments-api'
+
+jobs:
+  deploy:
+    name: 🚀 Deploy to Azure
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: 🔧 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: 📦 Cache NuGet packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
+    - name: 🔄 Restore Dependencies
+      run: dotnet restore
+    
+    - name: 🏗️ Build Solution
+      run: dotnet build --configuration Release --no-restore
+    
+    - name: 🧪 Run Tests
+      run: dotnet test --configuration Release --no-build
+    
+    - name: 🔐 Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: 🐳 Login to Azure Container Registry
+      run: |
+        az acr login --name ${{ env.REGISTRY_NAME }}
+    
+    - name: 🏷️ Generate Image Tags
+      id: meta
+      run: |
+        echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+        echo "LATEST_TAG=latest" >> $GITHUB_OUTPUT
+        echo "FULL_IMAGE_NAME=${{ env.REGISTRY_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+    
+    - name: 🐳 Build and Push Docker Image
+      run: |
+        docker build -t ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.IMAGE_TAG }} .
+        docker build -t ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.LATEST_TAG }} .
+        docker push ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.IMAGE_TAG }}
+        docker push ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.LATEST_TAG }}
+    
+    - name: 🚀 Deploy to Azure Container Instance
+      run: |
+        az container create \
+          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+          --name fgc-payments-container \
+          --image ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.IMAGE_TAG }} \
+          --registry-login-server ${{ env.REGISTRY_NAME }}.azurecr.io \
+          --registry-username ${{ secrets.ACR_USERNAME }} \
+          --registry-password ${{ secrets.ACR_PASSWORD }} \
+          --dns-name-label fgc-payments-api \
+          --os-type Linux \
+          --ports 8080 \
+          --cpu 1 \
+          --memory 1.5 \
+          --restart-policy Always \
+          --environment-variables \
+            ASPNETCORE_ENVIRONMENT=Production \
+            ASPNETCORE_URLS=http://+:8080 \
+            ConnectionStrings__DefaultConnection="${{ secrets.CONNECTION_STRING }}" \
+            Jwt__SecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+            Jwt__Issuer=FGC.Users.API \
+            Jwt__Audience=FGC.Client \
+            Jwt__ExpireMinutes=120
+    
+    - name: 📊 Get Deployment Info
+      id: deployment-info
+      run: |
+        FQDN=$(az container show \
+          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+          --name fgc-payments-container \
+          --query ipAddress.fqdn -o tsv)
+        echo "FQDN=${FQDN}" >> $GITHUB_OUTPUT
+        echo "URL=http://${FQDN}:8080" >> $GITHUB_OUTPUT
+    
+    - name: 🏥 Health Check
+      run: |
+        echo "Waiting for application to start..."
+        sleep 60
+        curl -f ${{ steps.deployment-info.outputs.URL }}/health || echo "Health check pending"
+    
+    - name: 📝 Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Service**: FGC Payments API" >> $GITHUB_STEP_SUMMARY
+        echo "**Status**: ✅ Deployed Successfully" >> $GITHUB_STEP_SUMMARY
+        echo "**Image**: ${{ steps.meta.outputs.FULL_IMAGE_NAME }}:${{ steps.meta.outputs.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+        echo "**URL**: ${{ steps.deployment-info.outputs.URL }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Health**: ${{ steps.deployment-info.outputs.URL }}/health" >> $GITHUB_STEP_SUMMARY

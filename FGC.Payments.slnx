@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="FGC.Payments.Application/FGC.Payments.Application.csproj" />
+  <Project Path="FGC.Payments.Domain/FGC.Payments.Domain.csproj" />
+  <Project Path="FGC.Payments.Infrastructure/FGC.Payments.Infrastructure.csproj" />
+  <Project Path="FGC.Payments.Presentation/FGC.Payments.Presentation.csproj" />
+</Solution>

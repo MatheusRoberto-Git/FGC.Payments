@@ -1,0 +1,48 @@
+﻿name: CI - Continuous Integration
+
+on:
+  pull_request:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+
+jobs:
+  build:
+    name: 🏗️ Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: 🔧 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: 📦 Cache NuGet packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
+    - name: 🔄 Restore Dependencies
+      run: dotnet restore
+    
+    - name: 🏗️ Build Solution
+      run: dotnet build --configuration Release --no-restore
+    
+    - name: 🧪 Run Tests
+      run: dotnet test --configuration Release --no-build --verbosity normal
+    
+    - name: 📊 Build Summary
+      run: |
+        echo "## 🏗️ Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Status**: ✅ Build Successful" >> $GITHUB_STEP_SUMMARY
+        echo "**.NET Version**: ${{ env.DOTNET_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch**: ${{ github.head_ref || github.ref_name }}" >> $GITHUB_STEP_SUMMARY

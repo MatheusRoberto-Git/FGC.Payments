@@ -1,0 +1,66 @@
+## .NET Core
+bin/
+obj/
+*.user
+*.userosscache
+*.sln.docstates
+
+## Visual Studio
+.vs/
+*.suo
+*.cache
+*.vspscc
+*.vssscc
+*.pidb
+*.svclog
+*.scc
+
+## Rider
+.idea/
+
+## VS Code
+.vscode/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+bld/
+
+## NuGet
+*.nupkg
+**/packages/*
+*.nuget.props
+*.nuget.targets
+project.lock.json
+
+## Test Results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+
+## User-specific files
+*.user
+*.rsuser
+
+## JetBrains Rider
+*.sln.iml
+
+## macOS
+.DS_Store
+
+## Windows
+Thumbs.db
+ehthumbs.db
+
+## Logs
+*.log
+logs/
+
+## Environment
+.env
+.env.*
+appsettings.*.local.json
