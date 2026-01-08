@@ -7,11 +7,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.20.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.19" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.19" />
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FGC.Payments.Application\FGC.Payments.Application.csproj" />
     <ProjectReference Include="..\FGC.Payments.Domain\FGC.Payments.Domain.csproj" />
   </ItemGroup>
 

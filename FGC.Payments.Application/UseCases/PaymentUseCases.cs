@@ -1,4 +1,5 @@
 ﻿using FGC.Payments.Application.DTOs;
+using FGC.Payments.Application.Interfaces;
 using FGC.Payments.Domain.Entities;
 using FGC.Payments.Domain.Interfaces;
 
@@ -53,10 +54,12 @@ namespace FGC.Payments.Application.UseCases
     public class ProcessPaymentUseCase
     {
         private readonly IPaymentRepository _paymentRepository;
+        private readonly IMessagePublisher _messagePublisher;
 
-        public ProcessPaymentUseCase(IPaymentRepository paymentRepository)
+        public ProcessPaymentUseCase(IPaymentRepository paymentRepository, IMessagePublisher messagePublisher)
         {
             _paymentRepository = paymentRepository ?? throw new ArgumentNullException(nameof(paymentRepository));
+            _messagePublisher = messagePublisher ?? throw new ArgumentNullException(nameof(messagePublisher));
         }
 
         public async Task<PaymentResponseDTO> ExecuteAsync(ProcessPaymentDTO dto)
@@ -87,6 +90,17 @@ namespace FGC.Payments.Application.UseCases
             }
 
             await _paymentRepository.SaveAsync(payment);
+
+            // Publica mensagem no Service Bus
+            await _messagePublisher.PublishPaymentProcessedAsync(new PaymentProcessedMessage(
+                payment.Id,
+                payment.UserId,
+                payment.GameId,
+                payment.Amount,
+                payment.Status.ToString(),
+                payment.ProcessedAt ?? DateTime.UtcNow
+            ));
+
             payment.ClearDomainEvents();
 
             return new PaymentResponseDTO

@@ -1,6 +1,8 @@
-﻿using FGC.Payments.Application.UseCases;
+﻿using FGC.Payments.Application.Interfaces;
+using FGC.Payments.Application.UseCases;
 using FGC.Payments.Domain.Interfaces;
 using FGC.Payments.Infrastructure.Data.Context;
+using FGC.Payments.Infrastructure.Messaging;
 using FGC.Payments.Infrastructure.Repositories;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
@@ -111,6 +113,12 @@ builder.Services.AddScoped<GetPaymentStatusUseCase>();
 builder.Services.AddScoped<GetUserPaymentsUseCase>();
 builder.Services.AddScoped<RefundPaymentUseCase>();
 builder.Services.AddScoped<CancelPaymentUseCase>();
+
+#endregion
+
+#region [Services - Messaging]
+
+builder.Services.AddSingleton<IMessagePublisher, ServiceBusPublisher>();
 
 #endregion
 
