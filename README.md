@@ -4,7 +4,7 @@ Microsserviço de Pagamentos da plataforma **FIAP Cloud Games (FCG)**.
 
 ## 📋 Descrição
 
-Este microsserviço é responsável pelo processamento de pagamentos, gerenciamento de transações e controle de status de compras na plataforma FCG. Futuramente integrará com Azure Functions para processamento assíncrono.
+Este microsserviço é responsável pelo processamento de pagamentos, gerenciamento de transações e controle de status de compras na plataforma FCG. Integra com **Azure Service Bus** para comunicação assíncrona e notificações de pagamentos processados.
 
 ---
 
@@ -13,19 +13,19 @@ Este microsserviço é responsável pelo processamento de pagamentos, gerenciame
 O projeto segue os princípios da **Clean Architecture**, separando responsabilidades em camadas:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────-───┐
 │                  FGC.Payments.Presentation                   │
 │              (Controllers, Models, Program.cs)               │
-├─────────────────────────────────────────────────────────────┤
+├───────────────────────────────────────────────────────────-──┤
 │                  FGC.Payments.Application                    │
 │                    (DTOs, Use Cases)                         │
-├─────────────────────────────────────────────────────────────┤
+├────────────────────────────────────────────────────────────-─┤
 │                 FGC.Payments.Infrastructure                  │
-│              (Repositories, DbContext)                       │
-├─────────────────────────────────────────────────────────────┤
+│         (Repositories, DbContext, Messaging)                 │
+├─────────────────────────────────────────────────────────────-┤
 │                    FGC.Payments.Domain                       │
 │             (Entities, Enums, Interfaces)                    │
-└─────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────-┘
 ```
 
 ### Estrutura de Pastas
@@ -42,11 +42,15 @@ FGC.Payments/
 │   └── Interfaces/
 ├── FGC.Payments.Application/
 │   ├── DTOs/
+│   ├── Interfaces/
+│   │   └── IMessagePublisher.cs
 │   └── UseCases/
 ├── FGC.Payments.Infrastructure/
 │   ├── Data/
 │   │   ├── Configurations/
 │   │   └── Context/
+│   ├── Messaging/
+│   │   └── ServiceBusPublisher.cs
 │   └── Repositories/
 ├── FGC.Payments.Presentation/
 │   ├── Controllers/
@@ -142,10 +146,111 @@ FGC.Payments/
              │  Completed  │ │   Failed    │
              └──────┬──────┘ └─────────────┘
                     │
+                    │  📬 Service Bus
+                    │  (Notificação)
                     ▼
              ┌─────────────┐
              │  Refunded   │
              └─────────────┘
+```
+
+---
+
+## 📬 Azure Service Bus - Mensageria Assíncrona (Fase 4)
+
+Na Fase 4, implementamos comunicação assíncrona usando **Azure Service Bus** para notificar outros serviços quando um pagamento é processado.
+
+### Fluxo de Mensageria
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         FLUXO DE MENSAGERIA ASSÍNCRONA                                  │
+│                                                                                         │
+│    ┌──────────┐      POST /api/payments/{id}/process      ┌──────────────────┐          │
+│    │  Client  │ ─────────────────────────────────────────►│  Payments API    │          │
+│    └──────────┘                                           └────────┬─────────┘          │
+│                                                                    │                    │
+│                                                         1. Processa pagamento           │
+│                                                         2. Atualiza status              │
+│                                                         3. Publica mensagem             │
+│                                                                    │                    │
+│                                                                    ▼                    │
+│                                                           ┌──────────────────┐          │
+│                                                           │  Azure Service   │          │
+│                                                           │      Bus         │          │
+│                                                           │                  │          │
+│                                                           │  Queue:          │          │
+│                                                           │  payment-        │          │
+│                                                           │  notifications   │          │
+│                                                           └────────┬─────────┘          │
+│                                                                    │                    │
+│                                                                    │ Consome mensagem   │
+│                                                                    ▼                    │
+│                                                           ┌──────────────────┐          │
+│                                                           │  Azure Function  │          │
+│                                                           │   (Consumer)     │          │
+│                                                           │                  │          │
+│                                                           │  • Notificações  │          │
+│                                                           │  • E-mail        │          │
+│                                                           │  • Webhooks      │          │
+│                                                           │  • Integrações   │          │
+│                                                           └──────────────────┘          │
+│                                                                                         │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Interface IMessagePublisher
+
+```csharp
+public interface IMessagePublisher
+{
+    Task PublishPaymentProcessedAsync(PaymentProcessedMessage message);
+}
+
+public record PaymentProcessedMessage(
+    Guid PaymentId,
+    Guid UserId,
+    Guid GameId,
+    decimal Amount,
+    string Status,
+    DateTime ProcessedAt
+);
+```
+
+### Implementação ServiceBusPublisher
+
+```csharp
+public class ServiceBusPublisher : IMessagePublisher, IAsyncDisposable
+{
+    private readonly ServiceBusClient _client;
+    private readonly ServiceBusSender _sender;
+    private readonly ILogger<ServiceBusPublisher> _logger;
+
+    public async Task PublishPaymentProcessedAsync(PaymentProcessedMessage message)
+    {
+        var json = JsonSerializer.Serialize(message);
+        var serviceBusMessage = new ServiceBusMessage(json);
+        
+        await _sender.SendMessageAsync(serviceBusMessage);
+        
+        _logger.LogInformation(
+            "✅ Mensagem publicada no Service Bus. PaymentId: {PaymentId}, Status: {Status}",
+            message.PaymentId, message.Status);
+    }
+}
+```
+
+### Exemplo de Mensagem Publicada
+
+```json
+{
+  "PaymentId": "52453aa9-a78e-47ed-a831-9fa1326a6a00",
+  "UserId": "541d9aca-0619-47d4-bc6d-cf64ba74f4fe",
+  "GameId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "Amount": 99.90,
+  "Status": "Completed",
+  "ProcessedAt": "2026-01-08T22:43:37.5861524Z"
+}
 ```
 
 ---
@@ -170,7 +275,7 @@ Este microsserviço **valida tokens JWT** emitidos pelo **FGC Users API**.
 ```json
 {
   "Jwt": {
-    "SecretKey": "FGC_SuperSecretKey_2024_FIAP_TechChallenge_MinimumLengthRequired32Chars",
+    "SecretKey": "FGC_SuperSecretKey_2024_MinLength32Chars!",
     "Issuer": "FGC.Users.API",
     "Audience": "FGC.Client",
     "ExpireMinutes": 120
@@ -182,51 +287,109 @@ Este microsserviço **valida tokens JWT** emitidos pelo **FGC Users API**.
 
 ---
 
-## 🔧 Configuração Local
+## 🐳 Docker - Imagem Otimizada (Fase 4)
 
-### Pré-requisitos
+O Dockerfile foi otimizado na **Fase 4** com as seguintes melhorias:
 
-- .NET 8.0 SDK
-- SQL Server (local ou Azure)
-- Visual Studio 2022 ou VS Code
+| Melhoria | Antes | Depois |
+|----------|-------|--------|
+| **Tamanho da imagem** | ~93 MB | ~65 MB |
+| **Imagem base** | aspnet:8.0 | aspnet:8.0-alpine |
+| **Usuário** | root | appuser (non-root) |
+| **Health check** | Não tinha | Integrado |
 
-### Executar
+### Dockerfile Otimizado
 
-```bash
-cd FGC.Payments.Presentation
-dotnet restore
-dotnet run
+```dockerfile
+# Stage 1: Build
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+WORKDIR /src
+# ... build steps
+
+# Stage 2: Publish
+FROM build AS publish
+RUN dotnet publish -c Release -o /app/publish
+
+# Stage 3: Runtime (Alpine)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS final
+RUN addgroup -g 1000 appgroup && adduser -u 1000 -G appgroup -D appuser
+USER appuser
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 ```
 
-A API estará disponível em: `http://localhost:5003`
-
-### Migrations
+### Build & Run
 
 ```bash
-# Criar migration
-dotnet ef migrations add InitialCreate -p FGC.Payments.Infrastructure -s FGC.Payments.Presentation
+# Build
+docker build -t fgc-payments-api .
 
-# Aplicar migration
-dotnet ef database update -p FGC.Payments.Infrastructure -s FGC.Payments.Presentation
+# Run
+docker run -p 8080:8080 \
+  -e ConnectionStrings__DefaultConnection="sua_connection_string" \
+  -e Jwt__SecretKey="sua_secret_key" \
+  -e ServiceBus__ConnectionString="sua_servicebus_connection" \
+  fgc-payments-api
 ```
 
 ---
 
-## 🐳 Docker
+## ☸️ Kubernetes (AKS) - Fase 4
 
-### Build
+Na Fase 4, o microsserviço foi migrado para **Azure Kubernetes Service (AKS)**.
 
-```bash
-docker build -t fgc-payments-api .
+### Recursos Kubernetes
+
+| Recurso | Descrição |
+|---------|-----------|
+| **Deployment** | Gerencia os pods da aplicação |
+| **Service (ClusterIP)** | Exposição interna |
+| **Service (LoadBalancer)** | Exposição externa com IP público |
+| **HPA** | Auto scaling baseado em CPU (1-5 pods) |
+| **ConfigMap** | Configurações não sensíveis |
+| **Secret** | Dados sensíveis (connection strings, JWT, Service Bus) |
+
+### HPA (Horizontal Pod Autoscaler)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payments-api-hpa
+  namespace: fgc
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments-api
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
 ```
 
-### Run
+### Comandos Úteis
 
 ```bash
-docker run -p 8080:8080 \
-  -e ConnectionStrings__DefaultConnection="sua_connection_string" \
-  -e Jwt__SecretKey="sua_secret_key" \
-  fgc-payments-api
+# Ver pods
+kubectl get pods -n fgc
+
+# Ver logs
+kubectl logs -n fgc deployment/payments-api
+
+# Ver logs do Service Bus
+kubectl logs -n fgc deployment/payments-api | grep "Service Bus"
+
+# Ver HPA
+kubectl get hpa -n fgc
+
+# Escalar manualmente
+kubectl scale deployment/payments-api --replicas=3 -n fgc
 ```
 
 ---
@@ -241,80 +404,181 @@ docker run -p 8080:8080 \
 | `Jwt__Audience` | Audiência do token | ✅ |
 | `Jwt__ExpireMinutes` | Tempo de expiração em minutos | ✅ |
 | `ASPNETCORE_ENVIRONMENT` | Ambiente (Development/Production) | ✅ |
+| `ServiceBus__ConnectionString` | Connection string do Azure Service Bus | ✅ |
+| `ServiceBus__QueueName` | Nome da fila (payment-notifications) | ✅ |
+| `ApplicationInsights__ConnectionString` | APM monitoring | ⬜ |
+
+---
+
+# 📐 Arquitetura FIAP Cloud Games (FCG) - Fase 4
+
+## 🏛️ Visão Geral da Arquitetura
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      CLIENTES                                           │
+│    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐      │
+│    │   Web App    │     │  Mobile App  │     │   Swagger    │     │   Postman    │      │
+│    └──────┬───────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘      │
+└───────────┼────────────────────┼────────────────────┼────────────────────┼──────────────┘
+            └────────────────────┴────────────────────┴────────────────────┘
+                                          │
+                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                              AZURE CLOUD INFRASTRUCTURE                                 │
+│                                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                        AZURE KUBERNETES SERVICE (AKS)                             │  │
+│  │                            fgc-aks-cluster                                        │  │
+│  │                                                                                   │  │
+│  │   ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐       │  │
+│  │   │  🔐 FGC Users API   │  │  🎮 FGC Games API   │  │  💳 FGC Payments API│      │  │
+│  │   │      (Pod)          │  │      (Pod)          │  │      (Pod)          │       │  │
+│  │   │   HPA: 1-5 pods     │  │   HPA: 1-5 pods     │  │   HPA: 1-5 pods     │       │  │
+│  │   │   CPU target: 70%   │  │   CPU target: 70%   │  │   CPU target: 70%   │       │  │
+│  │   │                     │  │                     │  │                     │       │  │
+│  │   │  📍 LoadBalancer    │  │  📍 ClusterIP       │  │  📍 LoadBalancer   │       │  │
+│  │   │  68.220.143.16      │  │  (interno)          │  │  128.85.227.213     │       │  │
+│  │   └──────────┬──────────┘  └──────────┬──────────┘  └──────────┬──────────┘       │  │
+│  └──────────────┼────────────────────────┼────────────────────────┼──────────────────┘  │
+│                 │                        │                        │                     │
+│                 └────────────────────────┼────────────────────────┘                     │
+│                                          │                                              │
+│                            ┌─────────────┴─────────────┐                                │
+│                            ▼                           ▼                                │
+│  ┌─────────────────────────────────────┐  ┌─────────────────────────────────────-────┐  │
+│  │        AZURE SQL DATABASE           │  │         AZURE SERVICE BUS                │  │
+│  │   📍 fgc-sql-server.database.       │  │   📍 fgc-servicebus                     │  │
+│  │      windows.net                    │  │   📬 Queue: payment-notifications        │  │
+│  │   📁 fgc-database                   │  │                                          │  │
+│  │                                     │  │   Payments API ──► Service Bus ──►       │  │
+│  │   ┌─────────┐ ┌─────────┐ ┌───────┐ │  │                    Azure Function        │  │
+│  │   │ Users   │ │ Games   │ │Payments│ │  │                    (Consumer)           │  │
+│  │   └─────────┘ └─────────┘ └───────┘ │  │                                          │  │
+│  └─────────────────────────────────────┘  └─────────────────────────────────────────-┘  │
+│                                                                                         │
+│  ┌─────────────────────────────────────┐  ┌─────────────────────────────────────────-┐  │
+│  │      AZURE CONTAINER REGISTRY       │  │       APPLICATION INSIGHTS (APM)         │  │
+│  │   🐳 fgcregistry.azurecr.io         │  │   📊 Métricas de performance            │  │
+│  │   • fgc-users-api:latest            │  │   📈 Logs e traces distribuídos          │  │
+│  │   • fgc-games-api:latest            │  │   🔍 Monitoramento em tempo real         │  │
+│  │   • fgc-payments-api:latest         │  │                                          │  │
+│  └─────────────────────────────────────┘  └─────────────────────────────────────────-┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## 🔗 Comunicação entre Microsserviços
 
 ```
-┌─────────────────────┐
-│    FGC Users API    │
-│   (Autenticação)    │
-└─────────┬───────────┘
-          │
-          │ Token JWT + UserId
-          ▼
-┌─────────────────────┐         ┌─────────────────────┐
-│   FGC Games API     │────────►│  FGC Payments API   │
-│    (Catálogo)       │ GameId  │    (Transações)     │
-│   :8080 / :5002     │         │   :8080 / :5003     │
-└─────────────────────┘         └──────────┬──────────┘
-                                           │
-                                           │ Futuramente
-                                           ▼
-                                ┌─────────────────────┐
-                                │   Azure Functions   │
-                                │  (Processamento     │
-                                │   Assíncrono)       │
-                                └─────────────────────┘
+                    ┌─────────────────────┐
+                    │    FGC Users API    │
+                    │   (Autenticação)    │
+                    │  68.220.143.16      │
+                    └─────────┬───────────┘
+                              │
+                    Gera Token JWT
+                              │
+           ┌──────────────────┼──────────────────┐
+           │                  │                  │
+           ▼                  ▼                  ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  FGC Games API  │ │FGC Payments API │ │  Outros Clients │
+│   (Catálogo)    │ │  (Transações)   │ │   (Frontend)    │
+│  ClusterIP      │ │ 128.85.227.213  │ │                 │
+└─────────────────┘ └────────┬────────┘ └─────────────────┘
+                             │
+                             │ Publica mensagem
+                             ▼
+                   ┌─────────────────┐
+                   │  Service Bus    │
+                   │  (Mensageria)   │
+                   │                 │
+                   │  payment-       │
+                   │  notifications  │
+                   └────────┬────────┘
+                            │
+                            │ Consome
+                            ▼
+                   ┌─────────────────┐
+                   │ Azure Function  │
+                   │  (Consumer)     │
+                   └─────────────────┘
 ```
 
 ### Este microsserviço:
 - ✅ **Valida** tokens JWT do Users API
 - ✅ **Referencia** jogos do Games API (via GameId)
 - ✅ **Processa** transações de pagamento
+- ✅ **Publica** mensagens no Azure Service Bus
 - ✅ **Gerencia** status e histórico de pagamentos
 
 ### Dependências:
 - 🔵 **Azure SQL Database** - Armazenamento de dados
-- 🔵 **Azure Container Instance** - Hospedagem
-- 🟡 **Azure Functions** - Processamento assíncrono (futuro)
+- 🔵 **Azure Kubernetes Service** - Orquestração de containers
+- 🔵 **Azure Service Bus** - Mensageria assíncrona
+- 🔵 **Application Insights** - Monitoramento APM
 
 ---
 
-## 🚀 CI/CD
+## 🔧 Pipeline CI/CD
 
-### Pipeline CI (Pull Requests)
-
-```yaml
-- Checkout do código
-- Setup .NET 8.0
-- Restore de dependências
-- Build da solução
-- Execução de testes
 ```
-
-### Pipeline CD (Push para master)
-
-```yaml
-- Checkout do código
-- Build e testes
-- Login no Azure
-- Build da imagem Docker
-- Push para Azure Container Registry
-- Deploy no Azure Container Instance
-- Health check
+┌───────────────────────────────────────────────────────────────────────────────────────-──┐
+│                                    CI/CD PIPELINE                                        │
+│                                                                                          │
+│    ┌──────────────────────────────────────────────────────────────────────────────────-┐ │
+│    │                              GITHUB REPOSITORIES                                  │ │
+│    │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                   │ │
+│    │   │ fgc-users-api   │  │ fgc-games-api   │  │fgc-payments-api │                   │ │
+│    │   └────────┬────────┘  └────────┬────────┘  └────────┬────────┘                   │ │
+│    └────────────┼────────────────────┼────────────────────┼───────────────────────────-┘ │
+│                 └────────────────────┼────────────────────┘                              │
+│                                      ▼                                                   │
+│    ┌──────────────────────────────────────────────────────────────────────────────────-┐ │
+│    │                            GITHUB ACTIONS                                         │ │
+│    │                                                                                   │ │
+│    │   ┌────────────────────────────────────────────────────────────────────────-─┐    │ │
+│    │   │  CI (Pull Requests)                                                      │    │ │
+│    │   │  📥 Checkout ──► 🔧 Setup .NET ──► 📦 Restore ──► 🏗️ Build ──► 🧪 Test │    │ │
+│    │   └─────────────────────────────────────────────────────────────────────────-┘    │ │
+│    │                                                                                   │ │
+│    │   ┌─────────────────────────────────────────────────────────────────────────-┐    │ │
+│    │   │  CD (Push to master)                                                     │    │ │
+│    │   │  📥 Checkout ──► 🏗️ Build ──► 🧪 Test ──► 🔐 Azure Login                │    │ │
+│    │   │       │                                         │                        │    │ │
+│    │   │       ▼                                         ▼                        │    │ │
+│    │   │  🐳 Docker Build ──► 📤 Push ACR ──► 🚀 Deploy ──► 🏥 Health Check      │    │ │
+│    │   └─────────────────────────────────────────────────────────────────────────-┘    │ │
+│    └──────────────────────────────────────────────────────────────────────────────-────┘ │
+└────────────────────────────────────────────────────────────────────────────────────-─────┘
 ```
 
 ---
 
-## 📍 URLs de Produção
+## 📊 Recursos Azure - Fase 4
 
-| Ambiente | URL |
-|----------|-----|
-| **Swagger** | http://fgc-payments-api.eastus2.azurecontainer.io:8080 |
-| **Health Check** | http://fgc-payments-api.eastus2.azurecontainer.io:8080/health |
-| **Info** | http://fgc-payments-api.eastus2.azurecontainer.io:8080/info |
+| Recurso | Nome | Tipo | Região |
+|---------|------|------|--------|
+| Resource Group | `rg-fgc-api` | Resource Group | East US 2 |
+| AKS Cluster | `fgc-aks-cluster` | Azure Kubernetes Service | East US 2 |
+| SQL Server | `fgc-sql-server` | Azure SQL Server | East US 2 |
+| Database | `fgc-database` | Azure SQL Database | East US 2 |
+| Container Registry | `fgcregistry` | Azure Container Registry | East US 2 |
+| Service Bus | `fgc-servicebus` | Azure Service Bus | East US 2 |
+| Service Bus Queue | `payment-notifications` | Queue | East US 2 |
+| App Insights | `fgc-appinsights` | Application Insights | East US 2 |
+
+---
+
+## 🌐 URLs de Produção (Kubernetes)
+
+| Microsserviço | URL | Swagger |
+|---------------|-----|---------|
+| **Users API** | http://68.220.143.16 | ✅ |
+| **Games API** | Interno (ClusterIP) | - |
+| **Payments API** | http://128.85.227.213 | ✅ |
 
 ---
 
@@ -323,7 +587,7 @@ docker run -p 8080:8080 \
 ### 1. Obter Token (no Users API)
 
 ```bash
-curl -X POST http://fgc-users-api.eastus2.azurecontainer.io:8080/api/auth/login \
+curl -X POST http://68.220.143.16/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@fgc.com",
@@ -334,7 +598,7 @@ curl -X POST http://fgc-users-api.eastus2.azurecontainer.io:8080/api/auth/login 
 ### 2. Criar Pagamento
 
 ```bash
-curl -X POST http://localhost:5003/api/payments \
+curl -X POST http://128.85.227.213/api/payments \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
   -d '{
@@ -359,22 +623,19 @@ curl -X POST http://localhost:5003/api/payments \
     "status": "Pending",
     "method": "Pix",
     "transactionId": "TXN-20241208-A1B2C3D4",
-    "createdAt": "2024-12-08T10:30:00Z",
-    "processedAt": null,
-    "completedAt": null,
-    "failureReason": null
+    "createdAt": "2024-12-08T10:30:00Z"
   }
 }
 ```
 
-### 3. Processar Pagamento
+### 3. Processar Pagamento (dispara mensagem no Service Bus)
 
 ```bash
-curl -X POST http://localhost:5003/api/payments/{id}/process \
+curl -X POST http://128.85.227.213/api/payments/{id}/process \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
 ```
 
-### Resposta (Sucesso - 90% de chance)
+### Resposta (Sucesso)
 
 ```json
 {
@@ -390,399 +651,59 @@ curl -X POST http://localhost:5003/api/payments/{id}/process \
 }
 ```
 
-### Resposta (Falha - 10% de chance)
+> 📬 **Nota**: Após o processamento, uma mensagem é automaticamente publicada no Azure Service Bus na fila `payment-notifications`.
 
-```json
-{
-  "success": true,
-  "message": "Pagamento falhou: Transação recusada pelo gateway de pagamento",
-  "data": {
-    "id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
-    "status": "Failed",
-    "transactionId": "TXN-20241208-A1B2C3D4",
-    "failureReason": "Transação recusada pelo gateway de pagamento"
-  }
-}
-```
+### 4. Verificar Mensagem no Service Bus
 
-### 4. Consultar Status
+No Portal Azure:
+1. Acesse **Service Bus** → `fgc-servicebus`
+2. Vá em **Queues** → `payment-notifications`
+3. Clique em **Service Bus Explorer**
+4. Visualize as mensagens na fila
+
+### 5. Consultar Status
 
 ```bash
-curl -X GET http://localhost:5003/api/payments/{id}/status \
+curl -X GET http://128.85.227.213/api/payments/{id}/status \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
 ```
 
-### 5. Reembolsar (Admin)
+### 6. Reembolsar (Admin)
 
 ```bash
-curl -X POST http://localhost:5003/api/payments/{id}/refund \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
-```
-
-### 6. Histórico do Usuário
-
-```bash
-curl -X GET http://localhost:5003/api/payments/user/{userId} \
+curl -X POST http://128.85.227.213/api/payments/{id}/refund \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
 ```
 
 ---
 
-## 🔮 Funcionalidades
+## 🔮 Funcionalidades Implementadas
 
-### Azure Functions Integration
-- Processamento assíncrono de pagamentos
-- Notificações por e-mail/push
-- Webhooks para status updates
-- Retry automático em falhas
+### ✅ Fase 3
+- Clean Architecture
+- CI/CD com GitHub Actions
+- Deploy em Azure Container Instances
+- Autenticação JWT compartilhada
 
-### Event Sourcing
-- Registro de todos os eventos de pagamento
-- Auditoria completa de transações
-- Replay de eventos para debugging
-
-### Gateway de Pagamento Real
-- Integração com Stripe/PagSeguro/MercadoPago
-- Webhook handlers
-- Reconciliação automática
+### ✅ Fase 4
+- Dockerfile otimizado (Alpine, non-root, health check)
+- Migração para Azure Kubernetes Service (AKS)
+- HPA (Horizontal Pod Autoscaler)
+- **Azure Service Bus** - Mensageria assíncrona
+- Application Insights (APM)
 
 ---
 
-# 📐 Arquitetura FIAP Cloud Games (FCG) - Fase 3
+## 📋 Checklist da Fase 4
 
-## 🏛️ Visão Geral da Arquitetura
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                      CLIENTES                                            │
-│                                                                                          │
-│    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐      │
-│    │   Web App    │     │  Mobile App  │     │   Swagger    │     │   Postman    │      │
-│    └──────┬───────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘      │
-│           │                    │                    │                    │               │
-└───────────┼────────────────────┼────────────────────┼────────────────────┼───────────────┘
-            │                    │                    │                    │
-            └────────────────────┴────────────────────┴────────────────────┘
-                                          │
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                              AZURE CLOUD INFRASTRUCTURE                                  │
-│                                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                           AZURE CONTAINER INSTANCES                                │  │
-│  │                                                                                    │  │
-│  │   ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐       │  │
-│  │   │  🔐 FGC Users API   │  │  🎮 FGC Games API   │  │  💳 FGC Payments API│       │  │
-│  │   │                     │  │                     │  │                     │       │  │
-│  │   │  ┌───────────────┐  │  │  ┌───────────────┐  │  │  ┌───────────────┐  │       │  │
-│  │   │  │ Presentation  │  │  │  │ Presentation  │  │  │  │ Presentation  │  │       │  │
-│  │   │  ├───────────────┤  │  │  ├───────────────┤  │  │  ├───────────────┤  │       │  │
-│  │   │  │ Application   │  │  │  │ Application   │  │  │  │ Application   │  │       │  │
-│  │   │  ├───────────────┤  │  │  ├───────────────┤  │  │  ├───────────────┤  │       │  │
-│  │   │  │Infrastructure │  │  │  │Infrastructure │  │  │  │Infrastructure │  │       │  │
-│  │   │  ├───────────────┤  │  │  ├───────────────┤  │  │  ├───────────────┤  │       │  │
-│  │   │  │    Domain     │  │  │  │    Domain     │  │  │  │    Domain     │  │       │  │
-│  │   │  └───────────────┘  │  │  └───────────────┘  │  │  └───────────────┘  │       │  │
-│  │   │                     │  │                     │  │                     │       │  │
-│  │   │  📍 :8080           │  │  📍 :8080           │  │  📍 :8080           │       │  │
-│  │   │  fgc-users-api      │  │  fgc-games-api      │  │  fgc-payments-api   │       │  │
-│  │   └──────────┬──────────┘  └──────────┬──────────┘  └──────────┬──────────┘       │  │
-│  │              │                        │                        │                  │  │
-│  └──────────────┼────────────────────────┼────────────────────────┼──────────────────┘  │
-│                 │                        │                        │                     │
-│                 └────────────────────────┼────────────────────────┘                     │
-│                                          │                                              │
-│                                          ▼                                              │
-│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                              AZURE SQL DATABASE                                    │  │
-│  │                                                                                    │  │
-│  │   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐               │  │
-│  │   │  📋 Users       │    │  📋 Games       │    │  📋 Payments    │               │  │
-│  │   │                 │    │                 │    │                 │               │  │
-│  │   │  - Id           │    │  - Id           │    │  - Id           │               │  │
-│  │   │  - Name         │    │  - Title        │    │  - UserId       │               │  │
-│  │   │  - Email        │    │  - Description  │    │  - GameId       │               │  │
-│  │   │  - Password     │    │  - Price        │    │  - Amount       │               │  │
-│  │   │  - Role         │    │  - Category     │    │  - Status       │               │  │
-│  │   │  - IsActive     │    │  - Developer    │    │  - Method       │               │  │
-│  │   │  - CreatedAt    │    │  - Publisher    │    │  - TransactionId│               │  │
-│  │   │  - LastLoginAt  │    │  - ReleaseDate  │    │  - CreatedAt    │               │  │
-│  │   │                 │    │  - IsActive     │    │  - ProcessedAt  │               │  │
-│  │   │                 │    │  - Rating       │    │  - CompletedAt  │               │  │
-│  │   │                 │    │  - TotalSales   │    │  - FailureReason│               │  │
-│  │   └─────────────────┘    └─────────────────┘    └─────────────────┘               │  │
-│  │                                                                                    │  │
-│  │   📍 fgc-sql-server.database.windows.net                                          │  │
-│  │   📁 fgc-database                                                                 │  │
-│  └───────────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                          │
-│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                          AZURE CONTAINER REGISTRY                                  │  │
-│  │                                                                                    │  │
-│  │   🐳 fgcregistry.azurecr.io                                                       │  │
-│  │                                                                                    │  │
-│  │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                   │  │
-│  │   │ fgc-users-api   │  │ fgc-games-api   │  │fgc-payments-api │                   │  │
-│  │   │    :latest      │  │    :latest      │  │    :latest      │                   │  │
-│  │   └─────────────────┘  └─────────────────┘  └─────────────────┘                   │  │
-│  └───────────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                          │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🔄 Fluxo de Comunicação entre Microsserviços
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                          │
-│                              FLUXO DE AUTENTICAÇÃO JWT                                   │
-│                                                                                          │
-│    ┌──────────┐         POST /api/auth/login              ┌──────────────────┐          │
-│    │          │ ─────────────────────────────────────────►│                  │          │
-│    │  Client  │         { email, password }               │  FGC Users API   │          │
-│    │          │◄───────────────────────────────────────── │                  │          │
-│    └────┬─────┘         { token: "eyJ..." }               └──────────────────┘          │
-│         │                                                                                │
-│         │                                                                                │
-│         │  Authorization: Bearer eyJ...                                                  │
-│         │                                                                                │
-│         ├─────────────────────────────────────────────────────────────────┐              │
-│         │                                                                 │              │
-│         ▼                                                                 ▼              │
-│    ┌──────────────────┐                                    ┌──────────────────┐         │
-│    │                  │         Valida JWT                 │                  │         │
-│    │  FGC Games API   │         (mesma SecretKey)          │FGC Payments API  │         │
-│    │                  │                                    │                  │         │
-│    └──────────────────┘                                    └──────────────────┘         │
-│                                                                                          │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🛒 Fluxo de Compra de Jogo
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                          │
-│                               FLUXO DE COMPRA DE JOGO                                    │
-│                                                                                          │
-│    ┌──────────┐                                                                          │
-│    │  Client  │                                                                          │
-│    └────┬─────┘                                                                          │
-│         │                                                                                │
-│         │ 1️⃣ POST /api/auth/login                                                        │
-│         ▼                                                                                │
-│    ┌──────────────────┐                                                                  │
-│    │  FGC Users API   │  ──►  Valida credenciais                                        │
-│    │                  │  ──►  Retorna JWT Token                                         │
-│    └────────┬─────────┘                                                                  │
-│             │                                                                            │
-│             │ { token }                                                                  │
-│             ▼                                                                            │
-│    ┌──────────┐                                                                          │
-│    │  Client  │                                                                          │
-│    └────┬─────┘                                                                          │
-│         │                                                                                │
-│         │ 2️⃣ GET /api/games (com Bearer Token)                                           │
-│         ▼                                                                                │
-│    ┌──────────────────┐                                                                  │
-│    │  FGC Games API   │  ──►  Valida JWT                                                │
-│    │                  │  ──►  Retorna lista de jogos                                    │
-│    └────────┬─────────┘                                                                  │
-│             │                                                                            │
-│             │ { games[] }                                                                │
-│             ▼                                                                            │
-│    ┌──────────┐                                                                          │
-│    │  Client  │  ──►  Usuário escolhe um jogo                                           │
-│    └────┬─────┘                                                                          │
-│         │                                                                                │
-│         │ 3️⃣ POST /api/payments (com Bearer Token)                                       │
-│         │    { userId, gameId, amount, paymentMethod }                                   │
-│         ▼                                                                                │
-│    ┌──────────────────┐                                                                  │
-│    │FGC Payments API  │  ──►  Valida JWT                                                │
-│    │                  │  ──►  Cria pagamento (status: Pending)                          │
-│    └────────┬─────────┘                                                                  │
-│             │                                                                            │
-│             │ { payment: { id, status: "Pending" } }                                     │
-│             ▼                                                                            │
-│    ┌──────────┐                                                                          │
-│    │  Client  │                                                                          │
-│    └────┬─────┘                                                                          │
-│         │                                                                                │
-│         │ 4️⃣ POST /api/payments/{id}/process                                             │
-│         ▼                                                                                │
-│    ┌──────────────────┐                                                                  │
-│    │FGC Payments API  │  ──►  Processa pagamento                                        │
-│    │                  │  ──►  Atualiza status (Completed/Failed)                        │
-│    └────────┬─────────┘                                                                  │
-│             │                                                                            │
-│             │ { payment: { status: "Completed" } }                                       │
-│             ▼                                                                            │
-│    ┌──────────┐                                                                          │
-│    │  Client  │  ──►  ✅ Compra finalizada!                                              │
-│    └──────────┘                                                                          │
-│                                                                                          │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🔧 Pipeline CI/CD
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                          │
-│                                    CI/CD PIPELINE                                        │
-│                                                                                          │
-│    ┌──────────────────────────────────────────────────────────────────────────────────┐ │
-│    │                              GITHUB REPOSITORIES                                  │ │
-│    │                                                                                   │ │
-│    │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                  │ │
-│    │   │ fgc-users-api   │  │ fgc-games-api   │  │fgc-payments-api │                  │ │
-│    │   └────────┬────────┘  └────────┬────────┘  └────────┬────────┘                  │ │
-│    │            │                    │                    │                           │ │
-│    └────────────┼────────────────────┼────────────────────┼───────────────────────────┘ │
-│                 │                    │                    │                             │
-│                 └────────────────────┼────────────────────┘                             │
-│                                      │                                                  │
-│                                      ▼                                                  │
-│    ┌──────────────────────────────────────────────────────────────────────────────────┐ │
-│    │                            GITHUB ACTIONS                                         │ │
-│    │                                                                                   │ │
-│    │   ┌─────────────────────────────────────────────────────────────────────────┐    │ │
-│    │   │                        CI (Pull Requests)                                │    │ │
-│    │   │                                                                          │    │ │
-│    │   │   📥 Checkout  ──►  🔧 Setup .NET  ──►  📦 Restore  ──►  🏗️ Build  ──►  🧪 Test │ │
-│    │   └─────────────────────────────────────────────────────────────────────────┘    │ │
-│    │                                                                                   │ │
-│    │   ┌─────────────────────────────────────────────────────────────────────────┐    │ │
-│    │   │                        CD (Push to master)                               │    │ │
-│    │   │                                                                          │    │ │
-│    │   │   📥 Checkout  ──►  🏗️ Build  ──►  🧪 Test  ──►  🔐 Azure Login          │    │ │
-│    │   │        │                                              │                  │    │ │
-│    │   │        ▼                                              ▼                  │    │ │
-│    │   │   🐳 Docker Build  ──►  📤 Push ACR  ──►  🚀 Deploy ACI  ──►  🏥 Health  │    │ │
-│    │   └─────────────────────────────────────────────────────────────────────────┘    │ │
-│    └──────────────────────────────────────────────────────────────────────────────────┘ │
-│                                      │                                                  │
-│                                      ▼                                                  │
-│    ┌──────────────────────────────────────────────────────────────────────────────────┐ │
-│    │                              AZURE RESOURCES                                      │ │
-│    │                                                                                   │ │
-│    │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                  │ │
-│    │   │ Container       │  │ Container       │  │   SQL Server    │                  │ │
-│    │   │ Registry (ACR)  │  │ Instances (ACI) │  │   Database      │                  │ │
-│    │   └─────────────────┘  └─────────────────┘  └─────────────────┘                  │ │
-│    └──────────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                          │
-└─────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 📊 Recursos Azure
-
-| Recurso | Nome | Tipo | Região |
-|---------|------|------|--------|
-| Resource Group | `rg-fgc-api` | Resource Group | East US 2 |
-| SQL Server | `fgc-sql-server` | Azure SQL Server | East US 2 |
-| Database | `fgc-database` | Azure SQL Database | East US 2 |
-| Container Registry | `fgcregistry` | Azure Container Registry | East US 2 |
-| Container Instance | `fgc-users-container` | Azure Container Instance | East US 2 |
-| Container Instance | `fgc-games-container` | Azure Container Instance | East US 2 |
-| Container Instance | `fgc-payments-container` | Azure Container Instance | East US 2 |
-
----
-
-## 🌐 URLs de Produção
-
-| Microsserviço | URL | Swagger |
-|---------------|-----|---------|
-| **Users API** | http://fgc-users-api.eastus2.azurecontainer.io:8080 | ✅ |
-| **Games API** | http://fgc-games-api.eastus2.azurecontainer.io:8080 | ✅ |
-| **Payments API** | http://fgc-payments-api.eastus2.azurecontainer.io:8080 | ✅ |
-
----
-
-## 🔐 Segurança
-
-### JWT Token Flow
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        JWT TOKEN                                │
-│                                                                 │
-│  Header:     { "alg": "HS256", "typ": "JWT" }                  │
-│                                                                 │
-│  Payload:    {                                                  │
-│                "sub": "user-id",                               │
-│                "email": "user@email.com",                      │
-│                "role": "Admin",                                │
-│                "exp": 1702044800                               │
-│              }                                                  │
-│                                                                 │
-│  Signature:  HMACSHA256(                                       │
-│                base64UrlEncode(header) + "." +                 │
-│                base64UrlEncode(payload),                       │
-│                secret_key                                       │
-│              )                                                  │
-│                                                                 │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### Mesma Secret Key em todos os microsserviços:
-
-```
-FGC_SuperSecretKey_2024_FIAP_TechChallenge_MinimumLengthRequired32Chars
-```
-
----
-
-## 📁 Estrutura dos Repositórios
-
-```
-GitHub Organization/User
-│
-├── 📁 fgc-users-api/
-│   ├── 📁 .github/workflows/
-│   │   ├── ci.yml
-│   │   └── cd.yml
-│   ├── 📁 FGC.Users.Domain/
-│   ├── 📁 FGC.Users.Application/
-│   ├── 📁 FGC.Users.Infrastructure/
-│   ├── 📁 FGC.Users.Presentation/
-│   ├── 🐳 Dockerfile
-│   ├── 📄 FGC.Users.sln
-│   └── 📖 README.md
-│
-├── 📁 fgc-games-api/
-│   ├── 📁 .github/workflows/
-│   │   ├── ci.yml
-│   │   └── cd.yml
-│   ├── 📁 FGC.Games.Domain/
-│   ├── 📁 FGC.Games.Application/
-│   ├── 📁 FGC.Games.Infrastructure/
-│   ├── 📁 FGC.Games.Presentation/
-│   ├── 🐳 Dockerfile
-│   ├── 📄 FGC.Games.sln
-│   └── 📖 README.md
-│
-└── 📁 fgc-payments-api/
-    ├── 📁 .github/workflows/
-    │   ├── ci.yml
-    │   └── cd.yml
-    ├── 📁 FGC.Payments.Domain/
-    ├── 📁 FGC.Payments.Application/
-    ├── 📁 FGC.Payments.Infrastructure/
-    ├── 📁 FGC.Payments.Presentation/
-    ├── 🐳 Dockerfile
-    ├── 📄 FGC.Payments.sln
-    └── 📖 README.md
-```
+| Requisito | Status |
+|-----------|--------|
+| ✅ Dockerfiles otimizados (Alpine, non-root) | Implementado |
+| ✅ Cluster Kubernetes (AKS) | Implementado |
+| ✅ Deployments e Services | Implementado |
+| ✅ HPA (Auto Scaling 1-5 pods, CPU 70%) | Implementado |
+| ✅ **Comunicação Assíncrona (Azure Service Bus)** | **Implementado** |
+| ✅ APM (Application Insights) | Implementado |
 
 ---
 
@@ -790,4 +711,4 @@ GitHub Organization/User
 
 FIAP - Pós-Graduação em Arquitetura de Software .NET
 
-**Tech Challenge - Fase 3**
+**Tech Challenge - Fase 4**
